@@ -1,0 +1,23 @@
+module.exports = {
+    command: 500,
+    takeoff: 6000,
+    land: 6000,
+    up: 250,
+    down: 250,
+    left: 250,
+    go: 20,
+    right: 250,
+    forward: 250,
+    back: 250,
+    cw: 250,
+    ccw: 250,
+    flip: 500,
+    speed: 200,
+    rc: 50,
+    'battery?': 500,
+    'speed?': 500,
+    'time?': 500,
+    emergency: 100,
+    streamon: 100,
+    streamoff: 100
+}
