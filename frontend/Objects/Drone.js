@@ -1,5 +1,5 @@
 import socket from '../socket';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 
 var Drone = (function () {
 
@@ -7,12 +7,11 @@ var Drone = (function () {
     var socketState = false;
 
     var getState = function () {
-        return state;    // Or pull this from cookie/localStorage
+        return state;    
     };
 
     var setState = function (data) {
         state = data;
-        // Also set this in cookie/localStorage
     };
 
     var openSocket = function () {
@@ -20,17 +19,14 @@ var Drone = (function () {
             socket.on('dronestate', (data) => {
                 state = data
             });
-
             socketState = true;
         }
     }
 
     function openDroneStateSocket() {
         const [dronestate, updateDronestate] = useState({});
-
         useEffect(() => {
             socket.on('dronestate', updateDronestate);
-            //Drone.setState(dronestate);
         }, []);
         return dronestate;
 
@@ -40,10 +36,8 @@ var Drone = (function () {
         const [status, updateStatus] = useState(false);
         useEffect(() => {
             socket.on('status', updateStatus);
-            console.log(status);
         }, []);
         return status;
-
     }
 
     var getSignalStrength = function () {
@@ -61,7 +55,6 @@ var Drone = (function () {
         getSpeed, getSpeed,
         openDroneStateSocket, openDroneStateSocket,
         openStatusSocket, openStatusSocket
-
     }
 
 })();

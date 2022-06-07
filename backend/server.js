@@ -1,5 +1,6 @@
 const express = require("express");
 const http = require('http');
+const bodyParser = require('body-parser');
 
 const app = express();
 
@@ -42,6 +43,8 @@ io_server.listen(config.backend.IO_SERVER_PORT, () => {
     console.log('Socket IO server up and running.');
 })
 
+
+
 //---- stream server details -- //
 
 const WebSocket = require('ws');
@@ -58,9 +61,10 @@ const videoStreamServer = http.createServer(function (request, response) {
     request.on('data', function (data) {
         // Now that we have data let's pass it to the web socket server
         webSocketServer.broadcast(data);
+        
     });
 
-}).listen(3001); // Listen for streams on port 3001
+}).listen(config.backend.VIDEO_STREAMING_SERVER_PORT); // Listen for streams on port 3001
 
 const webSocketServer = new WebSocket.Server({
     server: videoStreamServer
@@ -77,29 +81,29 @@ webSocketServer.broadcast = function (data) {
 };
 
 
-/*
+app.use(bodyParser.json());
+app.use(
+    bodyParser.urlencoded({
+        extended: true,
+    })
+);
 
-var args = [
-    "-i", config.backend.drone.VIDEO_ENDPOINT,
-    "-r", "30",
-    "-s", "960x720",
-    "-codec:v", "mpeg1video",
-    "-b", "800k",
-    "-f", "mpegts",
-    config.backend.SERVER_HOST + ':' + config.backend.VIDEO_STREAMING_SERVER_PORT
-];
-
-// Spawn an ffmpeg instance
-var streamer = spawn('ffmpeg', args);
-// Uncomment if you want to see ffmpeg stream info
-//streamer.stderr.pipe(process.stderr);
-streamer.on("exit", function (code) {
-    console.log("Failure", code);
+app.use(function (req, res, next) {
+    res.header("Access-Control-Allow-Origin", "http://localhost:7777");
+    //res.header("Access-Control-Allow-Origin", "*");
+    res.header(
+        "Access-Control-Allow-Headers",
+        "Origin, X-Requested-With, Content-Type, Accept, X-CSRF-Token"
+    );
+    res.header("Access-Control-Allow-Methods", "OPTIONS, GET, POST");
+    res.header("Access-Control-Allow-Credentials", "true");
+    next();
 });
- */
-/*
-const webSocketServer = new WebSocket.Server({
-    server: streamServer
-  });
 
-  */
+app.listen(config.backend.DATA_PORT, () => {
+    console.log(`Example app listening on port ${config.backend.DATA_PORT}`)
+})
+
+app.get("/api/info/get", (req, res) => {
+    res.send(tello.getInfo());
+});

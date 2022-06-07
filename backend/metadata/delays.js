@@ -14,9 +14,10 @@ module.exports = {
     flip: 500,
     speed: 200,
     rc: 50,
-    'battery?': 500,
-    'speed?': 500,
-    'time?': 500,
+    'battery?': 100,
+    'speed?': 100,
+    'time?': 100,
+    'wifi?': 100,
     emergency: 100,
     streamon: 100,
     streamoff: 100

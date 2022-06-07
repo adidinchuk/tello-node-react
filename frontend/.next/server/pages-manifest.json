@@ -2,6 +2,6 @@
   "/_app": "pages/_app.js",
   "/_error": "pages/_error.js",
   "/_document": "pages/_document.js",
-  "/ControlUserInterface": "pages/ControlUserInterface.js",
-  "/MobileController": "pages/MobileController.js"
+  "/": "pages/index.js",
+  "/ControlUserInterface": "pages/ControlUserInterface.js"
 }

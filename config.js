@@ -9,7 +9,8 @@ module.exports = {
         IO_SERVER_PORT: 6767,
         SERVER_HOST: 'http://192.168.0.17',
         VIDEO_STREAMING_SERVER_HOST: 'ws://192.168.0.17',
-        VIDEO_STREAMING_SERVER_PORT : 3001
+        VIDEO_STREAMING_SERVER_PORT : 3001,
+        DATA_PORT: 3002
     },
     frontend : {
         

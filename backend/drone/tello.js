@@ -6,10 +6,15 @@ const commandSchema = require('../metadata/commands');
 const NodeCache = require('node-cache');
 const cv = require('opencv4nodejs');
 
+const util = require('./util');
+
 const HANDSHAKE_COMMAND = 'command';
-const CACHE_WINDOW_KEY = 'commandWindow';
+const CACHE_WIFI_KEY = 'wifiState';
+const CACHE_SPEED_KEY = 'speedState';
+const GET_COMMAND_TIMEOUT_THRESHOLD = 1000;
 
 const queue = require('queue');
+const config = require('../../config');
 const spawn = require('child_process').spawn;
 
 //list of permitted commands
@@ -21,11 +26,11 @@ class Tello {
     droneState = dgram.createSocket('udp4');
 
     // default settings //
-    commandPort = 8889;
-    statusPort = 8890;
-    videoEndpoint = "udp://0.0.0.0:11111";
-    videoServerEndpoint = "ws://localhost:3001"
-    host = '192.168.10.1';
+    commandPort = config.backend.drone.COMMAND_PORT;
+    statusPort = config.backend.drone.STATUS_PORT;
+    videoEndpoint = config.backend.drone.VIDEO_ENDPOINT;
+    videoServerEndpoint = config.backend.VIDEO_STREAMING_SERVER_HOST;
+    host = config.backend.drone.HOST;
     commandResetPeriod = 1000;
     reconnectionAttemptPeriod = 15000;
     statusSocketKey = 'dronestate';
@@ -63,7 +68,6 @@ class Tello {
         this.videoEndpoint = videoEndpoint !== undefined ? videoEndpoint : this.videoEndpoint;
         this.videoServerEndpoint = videoServerEndpoint !== undefined ? videoServerEndpoint : this.videoServerEndpoint;
 
-
         this.statusSocket = statusSocket;
         this.initDrone();
 
@@ -78,14 +82,15 @@ class Tello {
         this.updateOutputSockets();
         this.send(HANDSHAKE_COMMAND);
 
+        this.droneCache.set(CACHE_WIFI_KEY, { last: { value: null, timestamp: -1 }, current: { value: null, timestamp: -1 } });
+        this.droneCache.set(CACHE_SPEED_KEY, { last: { value: null, timestamp: -1 }, current: { value: null, timestamp: -1 } });
+
         setInterval(() => {
             if (Date.now() - this.lastResponseTimestamp > this.commandResetPeriod) {
                 this.connected = false;
                 this.send(HANDSHAKE_COMMAND);
             }
         }, this.reconnectionAttemptPeriod);
-
-        this.droneCache.set(CACHE_WINDOW_KEY, 0);
 
         var args = [
             "-i", this.videoEndpoint,
@@ -97,15 +102,104 @@ class Tello {
             "-tune", "zerolatency",
             this.videoServerEndpoint
         ];
-        
+
         // Spawn an ffmpeg instance
         var streamer = spawn('ffmpeg', args);
-        // Uncomment if you want to see ffmpeg stream info
-        //streamer.stderr.pipe(process.stderr);
+
         streamer.on("exit", function (code) {
             console.log("Failure", code);
         });
 
+        setInterval(() => {
+            this.requestWIFIState();
+        }, 3000);
+
+        setInterval(() => {
+            this.requestSpeedState();
+        }, 1000);
+
+    }
+
+    getInfo() {
+
+        let speed = 0;
+        let wifi = 0;
+
+        if (this.droneCache.get(CACHE_SPEED_KEY).current.value == null)
+            speed = this.droneCache.get(CACHE_SPEED_KEY).last.value;
+        else if (this.droneCache.get(CACHE_SPEED_KEY).current.value != -1)
+            speed = this.droneCache.get(CACHE_SPEED_KEY).current.value;
+        else
+            speed = null;
+
+        if (this.droneCache.get(CACHE_WIFI_KEY).current.value == null)
+            wifi = this.droneCache.get(CACHE_WIFI_KEY).last.value;
+        else if (this.droneCache.get(CACHE_WIFI_KEY).current.value != -1)
+            wifi = this.droneCache.get(CACHE_WIFI_KEY).current.value;
+        else
+            wifi = null;
+
+        //fix bug with Tello sometimes retuning 100 speed when grounded.
+        speed = speed == 100.0 ? 0 : speed;
+
+        return ({
+            wifi: wifi == -1 ? null : wifi,
+            speed: speed == -1 ? null : speed
+        })
+    }
+
+    requestWIFIState() {
+        if (this.getInfoBufferState()) {
+            this.droneCache.set(CACHE_WIFI_KEY, { last: this.droneCache.get(CACHE_WIFI_KEY).current, current: { value: null, timestamp: Date.now() } });
+            this.send('wifi?');
+        } else {
+            setTimeout(() => {
+                this.droneCache.set(CACHE_WIFI_KEY, { last: this.droneCache.get(CACHE_WIFI_KEY).current, current: { value: null, timestamp: Date.now() } });
+                this.send('wifi?');
+            }, 1000);
+        }
+    }
+
+    requestSpeedState() {
+        if (this.getInfoBufferState()) {
+            this.droneCache.set(CACHE_SPEED_KEY, { last: this.droneCache.get(CACHE_SPEED_KEY).current, current: { value: null, timestamp: Date.now() } });
+            this.send('speed?');
+        } else {
+            setTimeout(() => {
+                this.droneCache.set(CACHE_SPEED_KEY, { last: this.droneCache.get(CACHE_SPEED_KEY).current, current: { value: null, timestamp: Date.now() } });
+                this.send('speed?');
+            }, 1000);
+        }
+    }
+
+    getInfoBufferState() {
+        if (this.droneCache.get(CACHE_WIFI_KEY).current.value == null) {
+            if (Date.now() - this.droneCache.get(CACHE_WIFI_KEY).current.timestamp > GET_COMMAND_TIMEOUT_THRESHOLD) {
+                this.droneCache.set(CACHE_WIFI_KEY, { last: this.droneCache.get(CACHE_WIFI_KEY).current, current: { value: -1, timestamp: Date.now() } })
+            } else {
+                return false;
+            }
+        }
+
+        if (this.droneCache.get(CACHE_SPEED_KEY).current.value == null) {
+            if (Date.now() - this.droneCache.get(CACHE_SPEED_KEY).current.timestamp > GET_COMMAND_TIMEOUT_THRESHOLD) {
+                this.droneCache.set(CACHE_SPEED_KEY, { last: this.droneCache.get(CACHE_SPEED_KEY).current, current: { value: -1, timestamp: Date.now() } })
+            } else {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    processGetMessage(value) {
+        if (this.droneCache.get(CACHE_WIFI_KEY).current.value == null) {
+            this.droneCache.set(CACHE_WIFI_KEY, { last: this.droneCache.get(CACHE_WIFI_KEY).current, current: { value: value, timestamp: Date.now() } })
+        }
+
+        if (this.droneCache.get(CACHE_SPEED_KEY).current.value == null) {
+            this.droneCache.set(CACHE_SPEED_KEY, { last: this.droneCache.get(CACHE_SPEED_KEY).current, current: { value: value, timestamp: Date.now() } })
+        }
     }
 
     setStatusSocket(statusSocket, eventKey) {
@@ -118,7 +212,7 @@ class Tello {
         this.droneState.on('message',
             throttle(message => {
                 if (this.statusSocket != null) {
-                    const state = parseStateData(message.toString());
+                    const state = util.parseStateData(message.toString());
                     this.lastResponseTimestamp = Date.now();
                     this.statusSocket.emit(this.statusSocketKey, state);
                 }
@@ -133,18 +227,24 @@ class Tello {
                 this.lastPayload = Date.now();
                 if (!this.connected) {
                     this.connected = true;
+                    this.send('streamon');
                 }
 
             } else {
-                console.log('Error encounterd in drone IO response');
+
+                let floatVal = parseFloat(message);
+                if (floatVal != NaN) {
+                    this.processGetMessage(floatVal);
+                } else {
+                    console.log('Error encounterd in drone IO response');
+                }
                 return;
             }
 
         });
     }
 
-    send(command, data) {
-        console.log(command)
+    send(command, data) {        
         let rawInstructions = '';
         try {
             rawInstructions = buildDroneCommand(command, data, commandSchema);
@@ -153,7 +253,7 @@ class Tello {
             return;
         }
 
-        console.log(rawInstructions);
+
 
         if (command != HANDSHAKE_COMMAND && Date.now() - this.lastResponseTimestamp > this.commandResetPeriod)
             this.send(HANDSHAKE_COMMAND);
@@ -161,18 +261,18 @@ class Tello {
         var self = this;
         this.instructionQueue.push(async function (cb) {
             self.forwardSend(rawInstructions);
-            console.log(delays[command]);
+            //console.log(delays[command]);
             await wait(delays[command]);
             cb(null, true)
         })
-       
+
         return this.connected;
 
     }
 
     forwardSend(command) {
         console.log("FORWARDING TO DRONE: " + command);
-        this.droneIO.send(command, 0, command.length, this.commandPort, this.host, handleError);
+        this.droneIO.send(command, 0, command.length, this.commandPort, this.host, util.handleError);
     }
 
     getdroneState() {
@@ -181,18 +281,11 @@ class Tello {
 
 }
 
-function handleError(err) {
-    if (err) {
-        console.log('ERROR');
-        console.log(err);
-    }
-}
-
 function buildDroneCommand(command, data, schema) {
 
-    console.log(command)
+    
     if (!PERMITTED_COMMANDS.includes(command))
-        throw new Error('Command is not on the approved list.');
+        throw new Error('Command REJECTED as it is not on the approved list.');
 
     constructedCommand = command;
 
@@ -210,7 +303,7 @@ function buildDroneCommand(command, data, schema) {
             if (commandComponenet >= commandSchema.values.min && commandComponenet <= commandSchema.values.max)
                 resultString = commandComponenet;
             else
-                throw new Error('Provided value is outside the allowed threshold.');
+                throw new Error('Provided command value is outside the allowed threshold.');
         } else {
 
             for (var element of Object.keys(commandSchema))
@@ -224,13 +317,6 @@ function buildDroneCommand(command, data, schema) {
 
     return constructedCommand;
 
-}
-
-function parseStateData(message) {
-    return message.split(';').map(attr => attr.split(':')).reduce((data, [key, value]) => {
-        (value != undefined) ? data[key] = value : void (0);
-        return data;
-    }, {})
 }
 
 module.exports = Tello;

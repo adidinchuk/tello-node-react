@@ -13,19 +13,19 @@ import SpeedIcon from '@mui/icons-material/Speed';
 import TimerIcon from '@mui/icons-material/Timer';
 import HeightIcon from '@mui/icons-material/Height';
 import Grid from '@mui/material/Grid';
-
+import useSWR from 'swr'
+import axios from 'axios';
+import config from '../../config';
 
 const StatusBar = () => {
 
   const state = Drone.openDroneStateSocket();
   console.log(state)
-  // const speed = getSpeed();
-  // const signalStrength = getSignalStrength();
+  const [droneInfo, updateDroneInfo] = useState({wifi: null, speed: null});
 
-  const [droneSpeed, updateDroneSpeed] = useState(null);
-  const [droneSignalStrength, updateDroneSignalStrength] = useState(null);
-
-
+  const address = config.backend.SERVER_HOST + ':' + config.backend.DATA_PORT + '/api/info/get';
+  const fetcher = async (url) => await axios.get(url).then((res) => {res.data, updateDroneInfo(res.data)});
+  const { data, error } = useSWR(address, fetcher);
 
 
   return (
@@ -37,43 +37,43 @@ const StatusBar = () => {
 
               <Grid item xs={2} sm={2} md={2} >
                 <Typography variant="h6" color="inherit" component="div">
-                  <BatteryCharging90Icon className="ui-icons" /> {state != null ? state.bat + ' %' : 'N/A'}
+                  <BatteryCharging90Icon className="ui-icons" /> {state.bat != null ? state.bat + ' %' : 'N/A'}
                 </Typography>
               </Grid>
               <Grid item xs={2} sm={2} md={2} >
 
                 <Typography variant="h6" color="inherit" component="div">
-                  <ThermostatIcon className="ui-icons" /> {state != null ? state.temph + ' C' : 'N/A'}
-                </Typography>
-              </Grid>
-              <Grid item xs={2} sm={2} md={2} >
-
-
-                <Typography variant="h6" color="inherit" component="div">
-                  <SignalWifi3BarIcon className="ui-icons" />  {droneSignalStrength != null ? droneSignalStrength + ' dB' : 'N/A'}
-                </Typography>
-
-              </Grid>
-              <Grid item xs={2} sm={2} md={2} >
-
-
-                <Typography variant="h6" color="inherit" component="div">
-                  <SpeedIcon className="ui-icons" />  {droneSpeed != null ? droneSpeed + ' cm/s' : 'N/A'}
-                </Typography>
-              </Grid>
-              <Grid item xs={2} sm={2} md={2} >
-
-
-
-                <Typography variant="h6" color="inherit" component="div">
-                  <TimerIcon className="ui-icons" />  {state != null ? state.time + ' s' : 'N/A'}
+                  <ThermostatIcon className="ui-icons" /> {state.temph != null ? state.temph + ' C' : 'N/A'}
                 </Typography>
               </Grid>
               <Grid item xs={2} sm={2} md={2} >
 
 
                 <Typography variant="h6" color="inherit" component="div">
-                  <HeightIcon className="ui-icons" />  {state != null ? state.tof + ' cm' : 'N/A'}
+                  <SignalWifi3BarIcon className="ui-icons" />  {droneInfo.wifi != null ? droneInfo.wifi + ' dB' : 'N/A'}
+                </Typography>
+
+              </Grid>
+              <Grid item xs={2} sm={2} md={2} >
+
+
+                <Typography variant="h6" color="inherit" component="div">
+                  <SpeedIcon className="ui-icons" />  {droneInfo.speed != null ? droneInfo.speed + ' cm/s' : 'N/A'}
+                </Typography>
+              </Grid>
+              <Grid item xs={2} sm={2} md={2} >
+
+
+
+                <Typography variant="h6" color="inherit" component="div">
+                  <TimerIcon className="ui-icons" />  {state.time != null ? state.time + ' s' : 'N/A'}
+                </Typography>
+              </Grid>
+              <Grid item xs={2} sm={2} md={2} >
+
+
+                <Typography variant="h6" color="inherit" component="div">
+                  <HeightIcon className="ui-icons" />  {state.tof != undefined ? state.tof + ' cm' : 'N/A'}
                 </Typography>
               </Grid>
 
