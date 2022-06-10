@@ -4,7 +4,8 @@ const wait = require('waait');
 const delays = require('../metadata/delays');
 const commandSchema = require('../metadata/commands');
 const NodeCache = require('node-cache');
-const cv = require('opencv4nodejs');
+const cv2 = require('opencv4nodejs');
+
 
 const util = require('./util');
 
@@ -16,6 +17,14 @@ const GET_COMMAND_TIMEOUT_THRESHOLD = 1000;
 const queue = require('queue');
 const config = require('../../config');
 const spawn = require('child_process').spawn;
+
+const drawRect = (image, rect, color, opts = { thickness: 2 }) =>
+  image.drawRectangle(
+    rect,
+    color,
+    opts.thickness,
+    cv2.LINE_8
+  );
 
 //list of permitted commands
 const PERMITTED_COMMANDS = commandSchema.control.concat(commandSchema.read).concat(commandSchema.set);
@@ -34,6 +43,7 @@ class Tello {
     commandResetPeriod = 1000;
     reconnectionAttemptPeriod = 15000;
     statusSocketKey = 'dronestate';
+    Vcap = null;
 
     lastResponseTimestamp = -1;
 
@@ -44,6 +54,10 @@ class Tello {
     droneCache = new NodeCache();
 
     instructionQueue = queue({ results: [] });
+    captureOpen = false;
+    classifier = null;
+
+    classifier = null;
 
     /*
     * constructor description
@@ -55,7 +69,7 @@ class Tello {
     * @param  {[string]} reconnectionAttemptPeriod [this period dictates how often the server attempts to re-establish communication with the drone if nothing has been recieved since the commandResetPeriod]
     */
     constructor(commandPort, statusPort, host, videoEndpoint, videoServerEndpoint, statusSocket, statusSocketKey, commandResetPeriod, reconnectionAttemptPeriod) {
-
+        process.env.OPENCV_FFMPEG_DEBUG = -8;
         this.instructionQueue.concurrency = 1;
         this.instructionQueue.autostart = true;
 
@@ -69,7 +83,97 @@ class Tello {
         this.videoServerEndpoint = videoServerEndpoint !== undefined ? videoServerEndpoint : this.videoServerEndpoint;
 
         this.statusSocket = statusSocket;
+
+
+        this.classifier = new cv2.CascadeClassifier(cv2.HAAR_FRONTALFACE_ALT2);
+
         this.initDrone();
+
+        console.log(cv2.utils);
+
+    }
+
+    drawBlueRect = (image, rect, opts = { thickness: 2 }) =>
+        drawRect(image, rect, new cv2.Vec(255, 0, 0), opts);
+
+    setVideoEndpoint(endpoint) {
+        console.log('ini video')
+
+        const FPS = 100;
+
+        //this.initVideoStream(100);
+
+        setInterval(() => {
+
+
+
+            if (this.Vcap != null) {
+                this.captureOpen = true;
+                
+                const frame = this.Vcap.read();
+
+                if (frame.sizes.length == 0) {
+                    this.captureOpen = false;
+                    this.Vcap = null;
+                } else {
+                    
+
+                    
+
+                    // detect faces
+                    const { objects, numDetections } = this.classifier.detectMultiScale(frame.bgrToGray(), { scaleFactor: 1.2, minSize: new cv2.Size(100, 100) });
+               
+
+                    if (!objects.length) {
+                        endpoint.emit('image', cv2.imencode('.jpg', frame).toString('base64'));
+                    } else {
+                        // draw detection
+                        const numDetectionsTh = 10;
+                        objects.forEach((rect, i) => {
+                            
+                      
+                             if(numDetections[i] > numDetectionsTh)
+                             {
+                                const thickness = numDetections[i] < numDetectionsTh ? 1 : 2;
+                                this.drawBlueRect(frame, rect, { thickness });
+                             }
+                               
+                        });
+
+                        endpoint.emit('image', cv2.imencode('.jpg', frame).toString('base64'));
+                    }
+
+
+                }
+
+
+            }
+
+
+        }, 1000 / FPS);
+
+    }
+
+    async initVideoStream(delay) {
+
+        if (!this.captureOpen && this.connected) {
+            setTimeout(() => {
+                try {
+                    console.log('start')
+
+                    this.Vcap = new cv2.VideoCapture(this.videoEndpoint, cv2.CAP_FFMPEG, ['-tune', 'zerolatency', '-v', '0']);
+                    // this.Vcap.set();
+                    this.Vcap.set(cv2.CAP_PROP_FRAME_WIDTH, 24);
+                    this.Vcap.set(cv2.CAP_PROP_FRAME_HEIGHT, 24);
+               
+                     
+                    console.log('finish')
+                } catch (error) {
+                    console.log(error);
+                    this.initVideoStream(10000)
+                }
+            }, delay)
+        }
 
     }
 
@@ -89,33 +193,38 @@ class Tello {
             if (Date.now() - this.lastResponseTimestamp > this.commandResetPeriod) {
                 this.connected = false;
                 this.send(HANDSHAKE_COMMAND);
+                console.log('Connection with drone lost, attempting to reconnect.')
+                if (this.Vcap != null)
+                    this.Vcap.release();
             }
         }, this.reconnectionAttemptPeriod);
 
-        var args = [
-            "-i", this.videoEndpoint,
-            "-r", "30",
-            "-s", "1280x720",
-            "-codec:v", "mpeg1video",
-            "-b", "800k",
-            "-f", "mpegts",
-            "-tune", "zerolatency",
-            this.videoServerEndpoint
-        ];
-
-        // Spawn an ffmpeg instance
-        var streamer = spawn('ffmpeg', args);
-
-        streamer.on("exit", function (code) {
-            console.log("Failure", code);
-        });
+        /* var args = [
+              "-i", this.videoEndpoint,
+              "-r", "30",
+              "-s", "1280x720",
+              "-codec:v", "mpeg1video",
+              "-b", "800k",
+              "-f", "mpegts",
+              "-tune", "zerolatency",
+              this.videoServerEndpoint
+          ];
+     
+          // Spawn an ffmpeg instance
+          var streamer = spawn('ffmpeg', args);
+     
+          streamer.on("exit", function (code) {
+              console.log("Failure", code);
+          });*/
 
         setInterval(() => {
-            this.requestWIFIState();
+            if (this.connected)
+                this.requestWIFIState();
         }, 3000);
 
         setInterval(() => {
-            this.requestSpeedState();
+            if (this.connected)
+                this.requestSpeedState();
         }, 1000);
 
     }
@@ -226,8 +335,10 @@ class Tello {
                 console.log(`🚁 : ${message}`);
                 this.lastPayload = Date.now();
                 if (!this.connected) {
+                    console.log('Connection with drone has been re-established.')
                     this.connected = true;
                     this.send('streamon');
+                    this.initVideoStream(1000);
                 }
 
             } else {
@@ -244,7 +355,7 @@ class Tello {
         });
     }
 
-    send(command, data) {        
+    send(command, data) {
         let rawInstructions = '';
         try {
             rawInstructions = buildDroneCommand(command, data, commandSchema);
@@ -271,7 +382,7 @@ class Tello {
     }
 
     forwardSend(command) {
-        console.log("FORWARDING TO DRONE: " + command);
+        //console.log("FORWARDING TO DRONE: " + command);
         this.droneIO.send(command, 0, command.length, this.commandPort, this.host, util.handleError);
     }
 
@@ -283,7 +394,7 @@ class Tello {
 
 function buildDroneCommand(command, data, schema) {
 
-    
+
     if (!PERMITTED_COMMANDS.includes(command))
         throw new Error('Command REJECTED as it is not on the approved list.');
 

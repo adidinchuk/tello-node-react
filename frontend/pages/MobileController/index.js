@@ -6,7 +6,7 @@ import socket from '../../socket';
 import { Joystick } from 'react-joystick-component';
 import Box from '@mui/material/Box'
 
-import Drone from '../../Objects/Drone'
+import Drone from '../../objects/Drone'
 
 function commandButton(command, data) {
     return function () {

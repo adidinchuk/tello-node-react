@@ -36,25 +36,9 @@ const Commands = () => {
     }
 
     function handleRightJoystickStop(data) {
-        updateRightJoystickTarget({ x: 0, y: 0 });
-        //sendCommand('rc', generateRCData());    
-        //sendCommand('rc', {a : 0, b : 0, c : 0, d: 0});   
-        //sendCommand('forward', 20 );        
+        updateRightJoystickTarget({ x: 0, y: 0 });     
     }
 
-    /*
-    function generateGoData(target) {
-        console.log(target)
-        var scalFactor =
-            Math.abs(target.y) > Math.abs(target.x) ?
-                (10) / Math.abs(target.y) : (10) / Math.abs(target.x);
-
-        return {
-            x: Math.round(scalFactor * target.y) * 0.2,
-            y: -Math.round(scalFactor * target.x) * 0.2,
-            z: 0, speed: 70
-        }
-    }*/
 
     function generateRCData() {
         return {

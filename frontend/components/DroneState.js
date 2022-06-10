@@ -1,7 +1,7 @@
 import socket from '../socket'
 import { useEffect, useState } from 'react';
 
-import Drone from '../Objects/Drone'
+import Drone from '../objects/Drone'
 
 
 const DroneState = () => {

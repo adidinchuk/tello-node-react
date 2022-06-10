@@ -1,15 +1,25 @@
 const express = require("express");
 const http = require('http');
 const bodyParser = require('body-parser');
-
 const app = express();
 
 const io_server = http.createServer(app);
+const video_server = http.createServer(app);
+
 const { Server } = require("socket.io");
 const Tello = require("./drone/tello");
+const cv2 = require('opencv4nodejs');
 
+const io_endpoint = new Server(io_server, {
+    cors: {
+        origin: "*",
+        methods: ["GET", "POST"],
+        credentials: false
+    },
+    allowEIO3: true
+});
 
-const io = new Server(io_server, {
+const video_endpoint = new Server(video_server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"],
@@ -28,9 +38,10 @@ tello = new Tello(
     config.backend.SERVER_HOST + ':' + config.backend.VIDEO_STREAMING_SERVER_PORT
 );
 
-tello.setStatusSocket(io.sockets, 'dronestate');
+tello.setStatusSocket(io_endpoint.sockets, 'dronestate');
+tello.setVideoEndpoint(video_endpoint);
 
-io.on('connection', socket => {
+io_endpoint.on('connection', socket => {
     socket.on('command', message => {
         console.log(`Command sent from browser :`);
         console.log(message);
@@ -42,43 +53,22 @@ io.on('connection', socket => {
 io_server.listen(config.backend.IO_SERVER_PORT, () => {
     console.log('Socket IO server up and running.');
 })
+video_server.listen(config.backend.VIDEO_STREAMING_SERVER_PORT, () => {
+    console.log('Socket IO server up and running.');
+})
+/*
+const Vcap = new cv2.VideoCapture(config.backend.drone.VIDEO_ENDPOINT, cv2.CAP_FFMPEG);
+Vcap.set(cv2.CAP_PROP_FRAME_WIDTH, 300);
+Vcap.set(cv2.CAP_PROP_FRAME_HEIGHT, 300);
 
-
+setInterval(() => {
+    const frame = Vcap.read();
+    const image = cv2.imencode('.jpg', frame).toString('base64');
+    video_endpoint.emit('image', image);
+}, 1000 / FPS);*/
 
 //---- stream server details -- //
 
-const WebSocket = require('ws');
-
-const videoStreamServer = http.createServer(function (request, response) {
-
-    console.log(
-        'Device connected to the video stream from: ' +
-        request.socket.remoteAddress + ':' +
-        request.socket.remotePort
-    );
-
-    // When data comes from the stream (FFmpeg) we'll pass this to the web socket
-    request.on('data', function (data) {
-        // Now that we have data let's pass it to the web socket server
-        webSocketServer.broadcast(data);
-        
-    });
-
-}).listen(config.backend.VIDEO_STREAMING_SERVER_PORT); // Listen for streams on port 3001
-
-const webSocketServer = new WebSocket.Server({
-    server: videoStreamServer
-});
-
-
-// Broadcast the stream via websocket to connected clients
-webSocketServer.broadcast = function (data) {
-    webSocketServer.clients.forEach(function each(client) {
-        if (client.readyState === WebSocket.OPEN) {
-            client.send(data);
-        }
-    });
-};
 
 
 app.use(bodyParser.json());

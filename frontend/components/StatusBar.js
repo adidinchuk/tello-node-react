@@ -3,7 +3,7 @@ import AppBar from '@mui/material/AppBar';
 import Box from '@mui/material/Box';
 import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
-import Drone from '../Objects/Drone'
+import Drone from '../objects/Drone'
 import { useEffect, useState, useRef } from 'react';
 import BatteryCharging90Icon from '@material-ui/icons/BatteryCharging90';
 //import ThermostatIcon from '@material-ui/icons/Thermostat';
@@ -20,7 +20,6 @@ import config from '../../config';
 const StatusBar = () => {
 
   const state = Drone.openDroneStateSocket();
-  console.log(state)
   const [droneInfo, updateDroneInfo] = useState({wifi: null, speed: null});
 
   const address = config.backend.SERVER_HOST + ':' + config.backend.DATA_PORT + '/api/info/get';
