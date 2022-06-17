@@ -231,7 +231,6 @@ class Tello {
             //throttle data to 100ms updates
             throttle(rawMessage => {
                 if (this.statusSocket != null) {
-                    console.log('here')
                     const state = util.parseStateData(rawMessage.toString());
                     this.lastResponseTimestamp = Date.now();
                     //forward data downstream
