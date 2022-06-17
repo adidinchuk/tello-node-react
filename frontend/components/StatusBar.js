@@ -16,8 +16,11 @@ import Grid from '@mui/material/Grid';
 import useSWR from 'swr'
 import axios from 'axios';
 import config from '../../config';
+//import { useWebsocket } from '../SocketManager';
 
 const StatusBar = () => {
+
+  //const droneState = useWebsocket();
 
   const state = Drone.openDroneStateSocket();
   const [droneInfo, updateDroneInfo] = useState({wifi: null, speed: null});
@@ -29,7 +32,7 @@ const StatusBar = () => {
 
   return (
     <Box sx={{ flexGrow: 1 }} style={{ color: "gray", position: "fixed", bottom: 0, width: "100%" }}>
-      <AppBar position="sticky" color="inherit" className="test">
+      <AppBar position="sticky" color="inherit" className="status-bar">
         <Toolbar variant="regular">
           <Box sx={{ flexGrow: 1 }}>
             <Grid container spacing={{ xs: 2, md: 3 }} columns={{ xs: 12, sm: 12, md: 12 }}>

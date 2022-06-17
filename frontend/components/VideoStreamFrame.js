@@ -12,13 +12,21 @@ const VideoStreamFrame = (props) => {
 
     });
 
-    return (
+    let a = (props.height / props.abs) / 2;
+    let b  = a + '%';
 
-        <div
-            className={props.wrapperClassName}
-            style={{ height: props.height, width: props.width }}>
-            <img src={`data:image/jpeg;base64,${src}`} style={{ height: props.height, width: props.width }}></img>
+    return (
+        <div>
+            <img className='crosshair-image' src="http://pixelscommander.com/polygon/attitudeindicator/src//img/plane_mark.gif"
+                style={{ width: props.width+ 'px', top: (props.height / props.abs) / .02 + '%'}} ></img>
+               
+            <div
+                className={props.wrapperClassName}
+                style={{ height: props.height + 'px', width: props.width + 'px' }}>
+                <img src={`data:image/jpeg;base64,${src}`} style={{ height: props.height+ 'px', width: props.width+ 'px' }}></img>
+            </div>
         </div>
+
     );
 
 

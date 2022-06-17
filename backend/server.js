@@ -27,8 +27,8 @@ drone = new Drone(
     config.backend.SERVER_HOST + ':' + config.backend.VIDEO_STREAMING_SERVER_PORT
 );
 
-drone.setStatusSocket(IOEndpoint, 'dronestate');
-drone.setVideoEndpoint(videoEndpoint);
+drone.setIOStream(IOEndpoint, 'dronestate');
+drone.setDownstreamVideoStream(videoEndpoint);
 
 IOServer.listen(config.backend.IO_SERVER_PORT, () => {
     console.log(`IO socket server up and running on port ${config.backend.IO_SERVER_PORT}...`);

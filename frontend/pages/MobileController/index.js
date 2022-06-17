@@ -64,7 +64,7 @@ const IndexPage = () => {
         <Grid container justify="center" columns={{ xs: 2, sm: 4, md: 12 }} className="mobile-grid">
             <Grid item xs={12} sm={12} sx={{ height: '40px' }}>
                 <Button variant="outlined" color="success" sx={{ width: '100%' }} onClick={takeoff()}>
-                    LAND / LIFTOFF
+                { state.tof > 10 ? 'LAND' : 'LIFTOFF'}
                 </Button>
             </Grid>
             <Grid item xs={0} sm={2} md={6}>
