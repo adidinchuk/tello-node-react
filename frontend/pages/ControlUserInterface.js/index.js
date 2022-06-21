@@ -1,7 +1,6 @@
 import VideoStreamFrame from '../../components/VideoStreamFrame';
 import config from '../../../config';
 import Grid from '@mui/material/Grid';
-import { useEffect, useState } from 'react';
 import StatusBar from '../../components/StatusBar';
 import io from 'socket.io-client';
 import Box from '@mui/material/Box';
@@ -9,7 +8,7 @@ import Fab from '@mui/material/Fab';
 import NavigationIcon from '@mui/icons-material/Navigation';
 import PersonIcon from '@mui/icons-material/Person';
 import PeopleIcon from '@mui/icons-material/People';
-
+import { useEffect, useState, useRef, useContext } from 'react';
 import FormGroup from '@mui/material/FormGroup';
 import FormControlLabel from '@mui/material/FormControlLabel';
 import Switch from '@mui/material/Switch';
@@ -20,14 +19,15 @@ import CardActions from '@mui/material/CardActions';
 import CardContent from '@mui/material/CardContent';
 import Divider from '@mui/material/Divider';
 import Button from '@mui/material/Button';
+import { SocketManager } from '../../components/SocketManager';
+
 const resolutionRatio = 1.33333;
 const padding = 24;
 
 const videoOverlayOptions = {};
 
 const IndexPage = () => {
-
-    const state = Drone.openDroneStateSocket();    
+   
     const [windowDimension, detectHW] = useState(null);
     
     function detectSize() {
@@ -47,37 +47,7 @@ const IndexPage = () => {
 
     return (
         <div>
-
-            <Card sx={{ minWidth: 275 }} className="float-FAB-div">
-                <CardContent>
-
-
-                    <Box sx={{ flexGrow: 1 }}>
-                        <Grid container spacing={2}>
-                            <Grid item xs={8}>
-                                <FormControlLabel control={<Switch />} label="Follow" />
-                            </Grid>
-                            <Grid item xs={4}>
-                                <PersonIcon sx={{ mr: 0 }} className="FAB-icons" />
-                            </Grid>
-                            <Grid item xs={8}>
-                                <FormControlLabel control={<Switch />} label="Follow" />
-                            </Grid>
-                            <Grid item xs={4}>
-                                <PeopleIcon sx={{ mr: 0 }} className="FAB-icons" />
-                            </Grid>
-                        </Grid>
-                    </Box>
-                    <Divider />
-
-                    <div>
-                        <Button className='FAB-button' variant="outlined" color="success">{'land'}</Button>
-
-                    </div>
-
-
-                </CardContent>
-            </Card>
+           
 
 
             <Grid container spacing={0}>
@@ -94,7 +64,7 @@ const IndexPage = () => {
                     />
                 </div>
             </Grid>
-            <StatusBar />
+           <SocketManager><StatusBar/></SocketManager>
         </div>
     );
 

@@ -10,14 +10,20 @@ module.exports = {
             return;
         } else {
             // draw detection
-            const numDetectionsTh = 10;
+            const numDetectionsTh = 15;
+            var final = [];
             objects.forEach((rect, i) => {
                 if (numDetections[i] > numDetectionsTh) {
+                    final.push(rect);
                     const thickness = numDetections[i] < numDetectionsTh ? 1 : 2;
                     util.drawBlueRect(frame, rect, { thickness });
                 }
             });
+            if (final.length > 0)
+                return final;
+            else
+                return undefined;
         }
-        
+
     }
 }

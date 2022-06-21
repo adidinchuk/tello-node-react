@@ -8,10 +8,12 @@ const delays = require('../metadata/delays');
 const commandSchema = require('../metadata/commands');
 const util = require('./util');
 const vision = require('./vision');
+const PIDController = require('./PID');
 
 const HANDSHAKE_COMMAND = 'command';
 const WIFI_GET_COMMAND = 'wifi?';
 const SPEED_GET_COMMAND = 'speed?';
+const STATE_KEY = 'status';
 const GET_COMMAND_TIMEOUT_THRESHOLD = 1000;
 const RECONNECTION_ATTEMPT_PERIOD = 15000;
 const COMMAND_RESET_PERIOD = 1000;
@@ -20,6 +22,8 @@ const DRONE_STATE_THROTTLE = 1000;
 
 const queue = require('queue');
 const config = require('../../config');
+const { Console } = require('console');
+//const { forEach } = require('lodash');
 
 class Tello {
 
@@ -41,6 +45,16 @@ class Tello {
     lastResponseTimestamp = -1;
     connected = false;
     captureOpen = false;
+
+    followFaceFlag = true;
+    followFacesFlag = false;
+    followBorder = 100;
+    following = false;
+    followData = { a: 0, b: 0, c: 0, d: 0 };
+    moveInterval;
+
+    PIDX = new PIDController();
+    PIDZ = new PIDController();
 
     /*
     * constructor description
@@ -103,7 +117,7 @@ class Tello {
 
         setInterval(() => {
             if (this.connected)
-            this.requestDataState(SPEED_GET_COMMAND);
+                this.requestDataState(SPEED_GET_COMMAND);
         }, 1000);
     }
 
@@ -116,7 +130,7 @@ class Tello {
                     this.captureOpen = false;
                     this.videoCapture = null;
                 } else {
-                    vision.detectFace(frame);           
+                    this.processFrame(frame);
                     server.emit('image', cv2.imencode('.jpg', frame).toString('base64'));
                 }
             }
@@ -141,7 +155,7 @@ class Tello {
     getInfo() {
         let speed = 0;
         let wifi = 0;
-        
+
         if (this.droneCache.get(SPEED_GET_COMMAND).current.value == null)
             speed = this.droneCache.get(SPEED_GET_COMMAND).last.value;
         else if (this.droneCache.get(SPEED_GET_COMMAND).current.value != -1)
@@ -161,11 +175,11 @@ class Tello {
 
         return ({
             wifi: wifi == -1 ? null : wifi,
-            speed: speed == -1 ? null : speed
+            speed: speed == -1 ? null : speed,
         })
     }
 
-    requestDataState(key){
+    requestDataState(key) {
         this.droneCache.set('COMMAND_HOLD_KEY', key);
         if (this.getInfoBufferState()) {
             this.droneCache.set(key, { last: this.droneCache.get(key).current, current: { value: null, timestamp: Date.now() } });
@@ -219,6 +233,7 @@ class Tello {
         //once a 
         this.statusSocket.on('connection', socket => {
             socket.on('command', rawMessage => {
+                console.log(rawMessage)
                 this.send(rawMessage.command, rawMessage.data);
             });
             socket.emit('status', true);
@@ -234,8 +249,13 @@ class Tello {
                     const state = util.parseStateData(rawMessage.toString());
                     this.lastResponseTimestamp = Date.now();
                     //forward data downstream
-                    if (this.statusSocket != null)
-                        this.statusSocket.emit(this.statusSocketKey, state);
+                    if (this.statusSocket != null) {
+                        var data = state;
+                        data.other = this.getInfo();
+                        this.statusSocket.emit(this.statusSocketKey, data);
+                    }
+
+
                 }
             }, DRONE_STATE_THROTTLE)
         );
@@ -301,6 +321,51 @@ class Tello {
     //Returns the drone's current connection state (true / false)
     getdroneState() {
         return this.connected;
+    }
+
+    followFace() {
+        this.PIDX = new PIDController();
+        this.PIDZ = new PIDController();
+    }
+
+    processFrame(frame) {
+        var faces = vision.detectFace(frame);
+        
+
+        if (this.followFaceFlag && faces != undefined) {            
+            if(!this.following){
+                this.following = true;
+                this.followLoop(100);
+            }
+            var mainFace = faces[0];
+            faces.forEach((face) => {
+                if (mainFace.height * mainFace.width > face.height * face.width)
+                    mainFace = face;
+            });
+
+            var centerPoints = { x: mainFace.x + mainFace.width, z: mainFace.y + mainFace.height }
+            console.log((frame.sizes[0] / 2) - centerPoints.z)
+            var x = this.PIDX.getPIDOutput((frame.sizes[1] / 2) - centerPoints.x);
+            var z = this.PIDZ.getPIDOutput((frame.sizes[0] / 2) - centerPoints.z);
+            //console.log('x' + this.PIDX.getPIDOutput((frame.sizes[1] / 2) -  centerPoints.x));
+            //console.log('y' + this.PIDY.getPIDOutput((frame.sizes[0] / 2) -  centerPoints.y));
+            this.followData.c = z;
+            console.log('detected')
+        }
+        else if (this.following) {
+            this.send('rc', { a: 0, b: 0, c: 0, d: 0 });
+            this.following = false;
+            clearInterval(this.moveInterval);
+            console.log("TERMINATED");
+            
+        }
+    }
+
+    followLoop(updatePeriod) {
+        this.moveInterval = setInterval(() => {
+            if (this.following)
+                this.send('rc', { a: this.followData.a, b: 0, c: this.followData.c, d: 0 });
+        }, updatePeriod);
     }
 
 }

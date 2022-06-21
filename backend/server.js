@@ -59,3 +59,7 @@ app.listen(config.backend.DATA_PORT, () => {
 app.get("/api/info/get", (req, res) => {
     res.send(drone.getInfo());
 });
+
+app.get("/api/status/get", (req, res) => {
+    res.send(drone.getStatus());
+});
