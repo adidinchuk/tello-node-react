@@ -41,7 +41,7 @@ app.use(bodyParser.json());
 app.use( bodyParser.urlencoded({ extended: true, }) );
 
 app.use(function (req, res, next) {
-    res.header("Access-Control-Allow-Origin", "http://localhost:7777");
+    res.header("Access-Control-Allow-Origin", "http://localhost:" + config.frontend.APP_PORT);
     //res.header("Access-Control-Allow-Origin", "*");
     res.header(
         "Access-Control-Allow-Headers",
@@ -62,4 +62,17 @@ app.get("/api/info/get", (req, res) => {
 
 app.get("/api/status/get", (req, res) => {
     res.send(drone.getStatus());
+});
+
+app.post("/api/automation/followperson", (req, res) => {
+    console.log('works')
+    res.send(drone.setAutomationTarget('followPerson'));
+});
+
+app.post("/api/follow/followpersons", (req, res) => {
+    res.send(drone.setAutomationTarget('followPersons'));
+});
+
+app.post("/api/automation/clear", (req, res) => {
+    res.send(drone.clearAutomationTarget());
 });

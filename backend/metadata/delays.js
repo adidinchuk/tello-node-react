@@ -13,7 +13,7 @@ module.exports = {
     ccw: 250,
     flip: 500,
     speed: 200,
-    rc: 50,
+    rc: 10,
     'battery?': 100,
     'speed?': 100,
     'time?': 100,

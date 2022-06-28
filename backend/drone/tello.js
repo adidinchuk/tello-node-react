@@ -3,27 +3,25 @@ const throttle = require('lodash.throttle');
 const wait = require('waait');
 const NodeCache = require('node-cache');
 const cv2 = require('opencv4nodejs');
-
+const { fork } = require('child_process');
 const delays = require('../metadata/delays');
 const commandSchema = require('../metadata/commands');
 const util = require('./util');
 const vision = require('./vision');
-const PIDController = require('./PID');
-
+const automation = require('./automation')
+const PIDController = require('./PIDController');
 const HANDSHAKE_COMMAND = 'command';
 const WIFI_GET_COMMAND = 'wifi?';
 const SPEED_GET_COMMAND = 'speed?';
-const STATE_KEY = 'status';
 const GET_COMMAND_TIMEOUT_THRESHOLD = 1000;
 const RECONNECTION_ATTEMPT_PERIOD = 15000;
 const COMMAND_RESET_PERIOD = 1000;
 const VIDEO_STREAM_FPS = 100;
 const DRONE_STATE_THROTTLE = 1000;
+const FRAME_SIZE = [960, 720];
 
 const queue = require('queue');
 const config = require('../../config');
-const { Console } = require('console');
-//const { forEach } = require('lodash');
 
 class Tello {
 
@@ -31,6 +29,7 @@ class Tello {
     droneState = dgram.createSocket('udp4');
     droneCache = new NodeCache();
     instructionQueue = queue({ results: [] });
+
     faceDetectionClassifier = new cv2.CascadeClassifier(cv2.HAAR_FRONTALFACE_ALT2);
 
     // default settings //
@@ -40,21 +39,26 @@ class Tello {
     videoServerEndpoint = config.backend.VIDEO_STREAMING_SERVER_HOST;
     host = config.backend.drone.HOST;
 
+    automationOptions = ['followPerson', 'followPersons'];
+    observeWindow = [150, 150];
+
+    status = {
+        lastResponseTimestamp: -1,
+        connected: false,
+        captureOpen: false,
+        automated: false,
+        destinationTarget: { a: 0, b: 0, c: 0, d: 0 },
+        automationInstruction: null,
+        targetLock: true,
+        moveInterval: null,
+        rc: { a: 0, b: 0, c: 0, d: 0 }
+    }
+
     statusSocketKey = 'dronestate';
     videoCapture = null;
-    lastResponseTimestamp = -1;
-    connected = false;
-    captureOpen = false;
 
-    followFaceFlag = true;
-    followFacesFlag = false;
-    followBorder = 100;
-    following = false;
-    followData = { a: 0, b: 0, c: 0, d: 0 };
-    moveInterval;
-
-    PIDX = new PIDController();
-    PIDZ = new PIDController();
+    PIDX = new PIDController(0.3, 0, 1, 40, -40);
+    PIDZ = new PIDController(1, 0, 1, 40, -40);
 
     /*
     * constructor description
@@ -95,12 +99,12 @@ class Tello {
 
     startConnectionManager() {
         setInterval(() => {
-            if (Date.now() - this.lastResponseTimestamp > COMMAND_RESET_PERIOD) {
-                if (!this.connected) {
+            if (Date.now() - this.status.lastResponseTimestamp > COMMAND_RESET_PERIOD) {
+                if (!this.status.connected) {
                     process.stdout.clearLine(0);
                     process.stdout.cursorTo(0);
                 } else
-                    this.connected = false;
+                    this.status.connected = false;
                 process.stdout.write('Failed to establish communication with the drone, attempting to reconnect...')
 
                 this.send(HANDSHAKE_COMMAND);
@@ -111,12 +115,12 @@ class Tello {
         }, RECONNECTION_ATTEMPT_PERIOD);
 
         setInterval(() => {
-            if (this.connected)
+            if (this.status.connected)
                 this.requestDataState(WIFI_GET_COMMAND);
         }, 3000);
 
         setInterval(() => {
-            if (this.connected)
+            if (this.status.connected)
                 this.requestDataState(SPEED_GET_COMMAND);
         }, 1000);
     }
@@ -124,10 +128,10 @@ class Tello {
     setDownstreamVideoStream(server) {
         setInterval(() => {
             if (this.videoCapture != null) {
-                this.captureOpen = true;
+                this.status.captureOpen = true;
                 const frame = this.videoCapture.read();
                 if (frame.sizes.length == 0) {
-                    this.captureOpen = false;
+                    this.status.captureOpen = false;
                     this.videoCapture = null;
                 } else {
                     this.processFrame(frame);
@@ -138,10 +142,13 @@ class Tello {
     }
 
     async initVideoStream(delay) {
-        if (!this.captureOpen && this.connected) {
+        if (!this.status.captureOpen && this.status.connected) {
             setTimeout(() => {
                 try {
                     this.videoCapture = new cv2.VideoCapture(this.videoEndpoint, cv2.CAP_FFMPEG);
+                    this.videoCapture.set(cv2.CAP_PROP_BUFFERSIZE, 1);
+                    this.videoCapture.set(cv2.CAP_PROP_FPS, 30);
+
                 } catch (error) {
                     console.log(error);
                     this.initVideoStream(10000)
@@ -233,7 +240,7 @@ class Tello {
         //once a 
         this.statusSocket.on('connection', socket => {
             socket.on('command', rawMessage => {
-                console.log(rawMessage)
+
                 this.send(rawMessage.command, rawMessage.data);
             });
             socket.emit('status', true);
@@ -247,15 +254,17 @@ class Tello {
             throttle(rawMessage => {
                 if (this.statusSocket != null) {
                     const state = util.parseStateData(rawMessage.toString());
-                    this.lastResponseTimestamp = Date.now();
+                    this.status.lastResponseTimestamp = Date.now();
                     //forward data downstream
                     if (this.statusSocket != null) {
                         var data = state;
                         data.other = this.getInfo();
+                        data.rc = [{ name: 'X', value: this.status.rc.a }, { name: 'Y', value: this.status.rc.b }, { name: 'Z', value: this.status.rc.c }, { name: 'R', value: this.status.rc.d }];
+                        data.targetLocked = this.status.targetLock;
+                        data.automated = this.status.automated;
+                        data.automationInstruction = this.status.automationInstruction;
                         this.statusSocket.emit(this.statusSocketKey, data);
                     }
-
-
                 }
             }, DRONE_STATE_THROTTLE)
         );
@@ -263,12 +272,12 @@ class Tello {
         //set up the IO socket to read any feedback originating from the drone.
         this.droneIO.on('message', rawMessage => {
             let message = rawMessage.toString();
-            this.lastResponseTimestamp = Date.now(); //update the connection status timestamp
+            this.status.lastResponseTimestamp = Date.now(); //update the connection status timestamp
             if (message == 'ok') {
                 //if the drone was previously disconnected upgdate the state and open the video stream
-                if (!this.connected) {
+                if (!this.status.connected) {
                     console.log('\nConnection with the Tello drone has been established..')
-                    this.connected = true;
+                    this.status.connected = true;
                     this.send('streamon');
                     this.initVideoStream(1000);
                 }
@@ -298,7 +307,7 @@ class Tello {
             return;
         }
         //re-establish the connection with the drone if required
-        if (command != HANDSHAKE_COMMAND && Date.now() - this.lastResponseTimestamp > COMMAND_RESET_PERIOD)
+        if (command != HANDSHAKE_COMMAND && Date.now() - this.status.lastResponseTimestamp > COMMAND_RESET_PERIOD)
             this.send(HANDSHAKE_COMMAND);
         //push the command onto the drone command queue
         var self = this;
@@ -308,7 +317,7 @@ class Tello {
             await wait(delays[command]);
             callback(null, true)
         })
-        return this.connected;
+        return this.status.connected;
     }
     /*
     Forwards the raw command to the drone. 
@@ -320,52 +329,71 @@ class Tello {
 
     //Returns the drone's current connection state (true / false)
     getdroneState() {
-        return this.connected;
-    }
-
-    followFace() {
-        this.PIDX = new PIDController();
-        this.PIDZ = new PIDController();
+        return this.status.connected;
     }
 
     processFrame(frame) {
-        var faces = vision.detectFace(frame);
-        
+        var target;
+        if (this.status.automationInstruction == 'followPerson')
+            target = automation.trackFace(frame);
 
-        if (this.followFaceFlag && faces != undefined) {            
-            if(!this.following){
-                this.following = true;
-                this.followLoop(100);
+        if (target != undefined) {
+            this.status.destinationTarget = target;
+            //set the target locked flag and kick off the movement loop 
+            if (!this.status.targetLock) {
+                this.status.targetLock = true;
+                clearInterval(this.status.moveInterval);
+                this.followLoop(30);
             }
-            var mainFace = faces[0];
-            faces.forEach((face) => {
-                if (mainFace.height * mainFace.width > face.height * face.width)
-                    mainFace = face;
-            });
 
-            var centerPoints = { x: mainFace.x + mainFace.width, z: mainFace.y + mainFace.height }
-            console.log((frame.sizes[0] / 2) - centerPoints.z)
-            var x = this.PIDX.getPIDOutput((frame.sizes[1] / 2) - centerPoints.x);
-            var z = this.PIDZ.getPIDOutput((frame.sizes[0] / 2) - centerPoints.z);
-            //console.log('x' + this.PIDX.getPIDOutput((frame.sizes[1] / 2) -  centerPoints.x));
-            //console.log('y' + this.PIDY.getPIDOutput((frame.sizes[0] / 2) -  centerPoints.y));
-            this.followData.c = z;
-            console.log('detected')
+            frame.drawRectangle(
+                new cv2.Point2((frame.sizes[1] - this.observeWindow[1]) / 2, (frame.sizes[0] - this.observeWindow[0]) / 2),
+                new cv2.Point2((frame.sizes[1] + this.observeWindow[1]) / 2, (frame.sizes[0] + this.observeWindow[0]) / 2),
+                new cv2.Vec(255, 173, 5),
+                1,
+                cv2.LINE_8
+            )
         }
-        else if (this.following) {
-            this.send('rc', { a: 0, b: 0, c: 0, d: 0 });
-            this.following = false;
-            clearInterval(this.moveInterval);
-            console.log("TERMINATED");
-            
+
+        else if (this.status.targetLock) {
+            //clear the target lock flag and clear all move instruction if no lock is re-established in the next 0.5 seconds
+            this.status.targetLock = false;
+            setTimeout(() => {
+                if (!this.status.targetLock) {
+                    this.send('rc', { a: 0, b: 0, c: 0, d: 0 });
+                    clearInterval(this.status.moveInterval);
+                }
+            }, 50);
         }
     }
 
     followLoop(updatePeriod) {
-        this.moveInterval = setInterval(() => {
-            if (this.following)
-                this.send('rc', { a: this.followData.a, b: 0, c: this.followData.c, d: 0 });
+        this.status.moveInterval = setInterval(() => {
+            var xError = this.status.destinationTarget.x - (FRAME_SIZE[0] / 2);
+            var zError = -(this.status.destinationTarget.z - (FRAME_SIZE[1] / 2));
+            var r = 0;
+            var z = 0;
+            if (Math.abs(xError) > this.observeWindow[0] / 2)
+                r = this.PIDX.getPIDOutput(xError);
+            if (Math.abs(zError) > this.observeWindow[1] / 2)
+                z = this.PIDZ.getPIDOutput(zError);
+
+            this.status.rc = { a: 0, b: 0, c: z, d: r };
+
+            if (this.status.targetLock)
+                this.send('rc', { a: 0, b: 0, c: z, d: r });
+
         }, updatePeriod);
+    }
+
+    setAutomationTarget(flag) {
+        this.status.automationInstruction = flag;
+        this.status.automated = true;
+    }
+
+    clearAutomationTarget() {
+        this.status.automated = false;
+        this.status.automationInstruction = null;
     }
 
 }

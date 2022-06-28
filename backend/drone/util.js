@@ -18,7 +18,7 @@ module.exports = {
     drawBlueRect: (image, rect, opts = { thickness: 2 }) => {
         image.drawRectangle(
             rect,
-            new cv2.Vec(255, 0, 0),
+            new cv2.Vec(52, 84, 209),
             opts.thickness,
             cv2.LINE_8
         )
@@ -41,8 +41,11 @@ module.exports = {
             if (commandSchema.hasOwnProperty('values')) 
                 if (commandComponenet >= commandSchema.values.min && commandComponenet <= commandSchema.values.max)
                     resultString = commandComponenet;
-                else
+                else{
+                    console.log(data);
                     throw new Error('Provided command value is outside the allowed threshold.');
+                }
+                    
              else 
                 for (var element of Object.keys(commandSchema))
                     resultString += ' ' + processSubCommand(commandComponenet[element], commandSchema[element])
