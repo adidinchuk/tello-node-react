@@ -15,16 +15,16 @@ module.exports = {
             console.log(err);
         }
     },
-    drawBlueRect: (image, rect, opts = { thickness: 2 }) => {
+    drawRect: (image, rect, color) => {
         image.drawRectangle(
             rect,
-            new cv2.Vec(52, 84, 209),
-            opts.thickness,
+            new cv2.Vec(color[0], color[1], color[2]),
+            2,
             cv2.LINE_8
         )
     },
     buildDroneCommand(command, data, schema) {
-
+        
         if (!PERMITTED_COMMANDS.includes(command))
             throw new Error('Command REJECTED as it is not on the approved list.');
 
@@ -44,8 +44,7 @@ module.exports = {
                 else{
                     console.log(data);
                     throw new Error('Provided command value is outside the allowed threshold.');
-                }
-                    
+                }                    
              else 
                 for (var element of Object.keys(commandSchema))
                     resultString += ' ' + processSubCommand(commandComponenet[element], commandSchema[element])

@@ -3,44 +3,60 @@ const throttle = require('lodash.throttle');
 const wait = require('waait');
 const NodeCache = require('node-cache');
 const cv2 = require('opencv4nodejs');
-const { fork } = require('child_process');
 const delays = require('../metadata/delays');
 const commandSchema = require('../metadata/commands');
 const util = require('./util');
-const vision = require('./vision');
 const automation = require('./automation')
 const PIDController = require('./PIDController');
+const queue = require('queue');
+const config = require('../../config');
+
 const HANDSHAKE_COMMAND = 'command';
 const WIFI_GET_COMMAND = 'wifi?';
 const SPEED_GET_COMMAND = 'speed?';
-const GET_COMMAND_TIMEOUT_THRESHOLD = 1000;
-const RECONNECTION_ATTEMPT_PERIOD = 15000;
-const COMMAND_RESET_PERIOD = 1000;
-const VIDEO_STREAM_FPS = 100;
-const DRONE_STATE_THROTTLE = 1000;
-const FRAME_SIZE = [960, 720];
 
-const queue = require('queue');
-const config = require('../../config');
+
+const GET_COMMAND_TIMEOUT_THRESHOLD = 2000; // maximum time the server will wait for a read response from the drone (ms)
+const RECONNECTION_ATTEMPT_PERIOD = 5000; // reconnection attempt frequency (ms)
+const COMMAND_RESET_PERIOD = 1000; // permitted drone silence preiod before the connection is considered lost (ms)
+const AUTOMATION_CYCLE = 30; // frequency of the cycle that sends movement commands to the drone when in automation mode (ms)
+const DRONE_STATE_THROTTLE = 1000; // dictates how often drone state data should be sent downstream to consuming systems (ms)
+const FRAME_SIZE = [960, 720]; // drone camera frame size in pixles 
 
 class Tello {
 
     droneIO = dgram.createSocket('udp4');
     droneState = dgram.createSocket('udp4');
     droneCache = new NodeCache();
+    /* A queue is used to manage and execute instructions as they are recieved by the server. 
+     * Most commands will have a mimum delay and will be dropped by the drone if recieved inside the delay window
+     * The queue is used to manage requests, maintain their order and ensure they make their way through to the drone
+     * */
     instructionQueue = queue({ results: [] });
-
-    faceDetectionClassifier = new cv2.CascadeClassifier(cv2.HAAR_FRONTALFACE_ALT2);
 
     // default settings //
     commandPort = config.backend.drone.COMMAND_PORT;
     statusPort = config.backend.drone.STATUS_PORT;
     videoEndpoint = config.backend.drone.VIDEO_ENDPOINT;
-    videoServerEndpoint = config.backend.VIDEO_STREAMING_SERVER_HOST;
+    videoServerEndpoint = null;
     host = config.backend.drone.HOST;
+    downStreamVideoStreamServer = null;
 
     automationOptions = ['followPerson', 'followPersons'];
-    observeWindow = [150, 150];
+    statusSocketKey = 'dronestate';
+    /* As the automation loop converges on the designated target, the observeWindow value will be used as the acceptable 
+     * deviation area from the frame's center :
+     * i.e. a value of [75,*] will continusouly update the drone's x position until it is within 75 pixles of the x target
+     * i.e. a value of [*,75] will continusouly update the drone's z position until it is within 75 pixles of the z target
+     */
+    observeWindow = [75, 75];
+    /* As the automation loop converges on the designated target, the observeRange value will be used as the 
+     * acceptable deviation in the target's overall size as a % of the total frame. The largest error value (x vs z) 
+     * will be used as the PID driver.
+     * i.e. If the observeRange value is [0.2, 0.3] the drone will move forward if the target takes up less than 20% of the 
+     * total width or height. It will move backwards if the target takes up more than 30% of the total width or height. 
+     */
+    observeRange = [.2, .3];
 
     status = {
         lastResponseTimestamp: -1,
@@ -50,15 +66,17 @@ class Tello {
         destinationTarget: { a: 0, b: 0, c: 0, d: 0 },
         automationInstruction: null,
         targetLock: true,
-        moveInterval: null,
+        trackTargetMoveInterval: null,
         rc: { a: 0, b: 0, c: 0, d: 0 }
     }
 
-    statusSocketKey = 'dronestate';
     videoCapture = null;
 
-    PIDX = new PIDController(0.3, 0, 1, 40, -40);
-    PIDZ = new PIDController(1, 0, 1, 40, -40);
+    // PID controller definitions
+    // values have been tweeked for the Tello drone 
+    PIDX = new PIDController(0.02, 0, 0.02, 100, -100);
+    PIDY = new PIDController(8, 0, 15, 40, -40);
+    PIDZ = new PIDController(0.01, 0, 0.01, 100, -100);
 
     /*
     * constructor description
@@ -78,188 +96,129 @@ class Tello {
     initialize() {
         this.initCommandQueue();
         this.initCache();
+
         //bind IO and drone state sockets 
         this.droneIO.bind(this.commandPort);
         this.droneState.bind(this.statusPort);
-        this.updateOutputSockets();
-
+        this.initOutputSockets();
         this.send(HANDSHAKE_COMMAND);
-        this.startConnectionManager();
+        this.initConnectionManager();
+        this.initVideoProcessor();
     }
 
     initCache() {
+        //The WIFI_GET_COMMAND & SPEED_GET_COMMAND cache objects are used to track the drones state for these parameters
+        //The communication with the drone is async and requires for the server to remember the query state
         this.droneCache.set(WIFI_GET_COMMAND, { last: { value: null, timestamp: -1 }, current: { value: null, timestamp: -1 } });
         this.droneCache.set(SPEED_GET_COMMAND, { last: { value: null, timestamp: -1 }, current: { value: null, timestamp: -1 } });
     }
 
     initCommandQueue() {
+        //See comments above the instructionQueue definition
         this.instructionQueue.concurrency = 1;
         this.instructionQueue.autostart = true;
     }
 
-    startConnectionManager() {
+    /* The connection manager:
+     * 1. monitors the connection status with the drone
+     * 2. re-establishes the connection with the drone if an issue is detected 
+     * 3. clear any rc move command 
+     * 4. kick off intervals to poll speed and wifi data from the drone
+     */
+    initConnectionManager() {
+        //continously check for a stale status timestamp
         setInterval(() => {
             if (Date.now() - this.status.lastResponseTimestamp > COMMAND_RESET_PERIOD) {
-                if (!this.status.connected) {
-                    process.stdout.clearLine(0);
-                    process.stdout.cursorTo(0);
-                } else
+                //set the disconnected flag
+                if (this.status.connected) {
                     this.status.connected = false;
-                process.stdout.write('Failed to establish communication with the drone, attempting to reconnect...')
-
+                    process.stdout.write('Failed to establish communication with the drone, attempting to reconnect...')
+                }
+                //attempt to reconnect with a handshake
                 this.send(HANDSHAKE_COMMAND);
 
+                //release the videoCapture so it can be re-establsihed on the next frame
                 if (this.videoCapture != null)
                     this.videoCapture.release();
+
+                //nutralize the drone's current rc memory and clear the trackTargetMoveInterval to ensure safe connection recovery
+                setTimeout(() => {
+                    this.send('rc', { a: 0, b: 0, c: 0, d: 0 });
+                    clearInterval(this.status.trackTargetMoveInterval);
+                }, delays.command);
             }
         }, RECONNECTION_ATTEMPT_PERIOD);
 
+        //kick off the get wifi request cycle
         setInterval(() => {
             if (this.status.connected)
                 this.requestDataState(WIFI_GET_COMMAND);
         }, 3000);
-
+        //kick off the get speed request cycle
         setInterval(() => {
             if (this.status.connected)
                 this.requestDataState(SPEED_GET_COMMAND);
         }, 1000);
     }
 
-    setDownstreamVideoStream(server) {
+    initVideoProcessor() {
+        //kick off the video data processing process
         setInterval(() => {
             if (this.videoCapture != null) {
-                this.status.captureOpen = true;
+                //pull the next available frame in the videoCapture queue
                 const frame = this.videoCapture.read();
+                //clear the video capture and clear the captureOpen flag if the frame is empty
                 if (frame.sizes.length == 0) {
                     this.status.captureOpen = false;
                     this.videoCapture = null;
                 } else {
+                    //process the frame and push the processed video stream data downstream to consuming user interfaces
+                    this.status.captureOpen = true;
                     this.processFrame(frame);
-                    server.emit('image', cv2.imencode('.jpg', frame).toString('base64'));
+                    if (this.videoServerEndpoint != null)
+                        this.videoServerEndpoint.emit('image', cv2.imencode('.jpg', frame).toString('base64'));
                 }
             }
-        }, 1000 / VIDEO_STREAM_FPS);
+        }, 1000 / util.VIDEO_STREAM_FPS);
     }
-
+    /* function used to initialize a video capture
+     * @param  {[int]} delay [timed delay in ms after the function is called and before the capture is created]
+    */
     async initVideoStream(delay) {
+        // run if the drone is connected but no video data is available 
+        // a delay is used to allow for an optional delay between the initialization and the openining of the capture and add resilience
         if (!this.status.captureOpen && this.status.connected) {
             setTimeout(() => {
                 try {
                     this.videoCapture = new cv2.VideoCapture(this.videoEndpoint, cv2.CAP_FFMPEG);
-                    this.videoCapture.set(cv2.CAP_PROP_BUFFERSIZE, 1);
+                    this.videoCapture.set(cv2.CAP_PROP_BUFFERSIZE, 1); //not sure if this flag currently works
                     this.videoCapture.set(cv2.CAP_PROP_FPS, 30);
-
                 } catch (error) {
+                    //retry the operation if an error is encountered 
                     console.log(error);
-                    this.initVideoStream(10000)
+                    this.initVideoStream(2000)
                 }
             }, delay)
         }
     }
 
-
-
-    getInfo() {
-        let speed = 0;
-        let wifi = 0;
-
-        if (this.droneCache.get(SPEED_GET_COMMAND).current.value == null)
-            speed = this.droneCache.get(SPEED_GET_COMMAND).last.value;
-        else if (this.droneCache.get(SPEED_GET_COMMAND).current.value != -1)
-            speed = this.droneCache.get(SPEED_GET_COMMAND).current.value;
-        else
-            speed = null;
-
-        if (this.droneCache.get(WIFI_GET_COMMAND).current.value == null)
-            wifi = this.droneCache.get(WIFI_GET_COMMAND).last.value;
-        else if (this.droneCache.get(WIFI_GET_COMMAND).current.value != -1)
-            wifi = this.droneCache.get(WIFI_GET_COMMAND).current.value;
-        else
-            wifi = null;
-
-        //fix bug with Tello sometimes retuning 100 speed when grounded.
-        speed = speed == 100.0 ? 0 : speed;
-
-        return ({
-            wifi: wifi == -1 ? null : wifi,
-            speed: speed == -1 ? null : speed,
-        })
-    }
-
-    requestDataState(key) {
-        this.droneCache.set('COMMAND_HOLD_KEY', key);
-        if (this.getInfoBufferState()) {
-            this.droneCache.set(key, { last: this.droneCache.get(key).current, current: { value: null, timestamp: Date.now() } });
-            this.send(key);
-        } else {
-            setTimeout(() => {
-                this.droneCache.set(key, { last: this.droneCache.get(key).current, current: { value: null, timestamp: Date.now() } });
-                this.send(key);
-            }, 1000);
-        }
-    }
-
-    /*
-    verify if the server is currently waiting on a drone status response 
-    */
-    getInfoBufferState() {
-        if (this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current.value == null) {
-            if (Date.now() - this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current.timestamp > GET_COMMAND_TIMEOUT_THRESHOLD) {
-                this.droneCache.set(
-                    this.droneCache.get('COMMAND_HOLD_KEY'),
-                    {
-                        last: this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current,
-                        current: { value: -1, timestamp: Date.now() }
-                    })
-            } else {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /*
-    Parse and cache the raw data returned by the drone
-    */
-    processGetResponse(value) {
-        this.droneCache.set(
-            this.droneCache.get('COMMAND_HOLD_KEY'),
-            {
-                last: this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current,
-                current: { value: value, timestamp: Date.now() }
-            }
-        );
-    }
-
-    /*
-    Allows for the drone to hook into an upstream websocket for processing instructions
-    */
-    setIOStream(statusSocket, eventKey) {
-        this.statusSocketKey = eventKey !== undefined ? eventKey : this.statusSocketKey;
-        this.statusSocket = statusSocket.sockets;
-        //once a 
-        this.statusSocket.on('connection', socket => {
-            socket.on('command', rawMessage => {
-
-                this.send(rawMessage.command, rawMessage.data);
-            });
-            socket.emit('status', true);
-        })
-    }
-
-    updateOutputSockets() {
+    /* connect to the drone's state data feed and forward data downstream to the provided web socket
+     *
+     */
+    initOutputSockets() {
         //set the droneState socket to read any data flowing from the drone
         this.droneState.on('message',
             //throttle data to 100ms updates
             throttle(rawMessage => {
                 if (this.statusSocket != null) {
-                    const state = util.parseStateData(rawMessage.toString());
+                    const state = util.parseStateData(rawMessage.toString()); //parse raw data
                     this.status.lastResponseTimestamp = Date.now();
                     //forward data downstream
                     if (this.statusSocket != null) {
-                        var data = state;
+                        // append any other required additional data available server side that might be needed downstream
+                        let data = state;
                         data.other = this.getInfo();
-                        data.rc = [{ name: 'X', value: this.status.rc.a }, { name: 'Y', value: this.status.rc.b }, { name: 'Z', value: this.status.rc.c }, { name: 'R', value: this.status.rc.d }];
+                        data.rc = this.status.rc;
                         data.targetLocked = this.status.targetLock;
                         data.automated = this.status.automated;
                         data.automationInstruction = this.status.automationInstruction;
@@ -283,12 +242,12 @@ class Tello {
                 }
             } else {
                 /*
-                if the response is not 'ok' and is instead an integer, it is likely a response 
-                from the drone following a get command 
+                 * if the response is not 'ok' and is instead an integer, it is likely a response 
+                 * from the drone following a get command 
                 */
-                let floatVal = parseFloat(message);
-                if (floatVal != NaN)
-                    this.processGetResponse(floatVal);
+                let droneData = parseFloat(message);
+                if (droneData != NaN)
+                    this.processGetResponse(droneData);
                 else
                     console.log('Error encounterd in drone IO response');
                 return;
@@ -296,7 +255,90 @@ class Tello {
         });
     }
 
-    //This function should be used to send any required commands to the drone.
+    /*
+     * wrapper for the send method to include reply message processing
+     * this should be used for read commands that are accompanied by a response
+     *  @param  {[string]} key [the read command string key]
+     */
+    requestDataState(key) {
+        //check if the buffer currently reflects a read request hold
+        if (!this.getInfoReadHold()) {
+            // if there is no read hold, set a hold for the current read request
+            this.droneCache.set('COMMAND_HOLD_KEY', key);
+            //clear the cache of the value currently being read
+            this.droneCache.set(key, { last: this.droneCache.get(key).current, current: { value: null, timestamp: Date.now() } });
+            //forward the read request
+            this.send(key);
+        } else {
+            //if there is a read hold, retry in 0.1s
+            setTimeout(() => {
+                this.requestDataState(key);
+            }, 100);
+        }
+    }
+
+    /*
+    verify if there is a read hold on a previous read command 
+    */
+    getInfoReadHold() {
+        if (this.droneCache.get('COMMAND_HOLD_KEY') == null)
+            return false
+        // check if the current read value is empty
+        if (this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current.value == null) {
+            // check if the wait period for a response has expired 
+            if (Date.now() - this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current.timestamp > GET_COMMAND_TIMEOUT_THRESHOLD) {
+                // if the read command has timed out, set the value to -1
+                this.droneCache.set(
+                    this.droneCache.get('COMMAND_HOLD_KEY'),
+                    {
+                        last: this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current,
+                        current: { value: -1, timestamp: Date.now() }
+                    }
+                )
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /*
+     * Parse and cache the raw read response returned by the drone
+     * @param  {[float]} value [the float value returned by the drone]
+    */
+    processGetResponse(value) {
+        this.droneCache.set(
+            this.droneCache.get('COMMAND_HOLD_KEY'),
+            {
+                last: this.droneCache.get(this.droneCache.get('COMMAND_HOLD_KEY')).current,
+                current: { value: value, timestamp: Date.now() }
+            }
+        );
+    }
+
+    /*
+     * connect to an upstream websocket for processing instructions
+     * the instructions must be properly formatted
+     * this method cannot be used for read commands
+     * @param  {[socket.io Server object]} statusSocket [server used for transmition of IO data]
+     * @param  {[string]} eventKey [the key for the socket]
+     */
+    setIOStream(statusSocket, eventKey) {
+        this.statusSocketKey = eventKey !== undefined ? eventKey : this.statusSocketKey;
+        this.statusSocket = statusSocket.sockets;
+        //forward all commands directly to the drone via the send method
+        this.statusSocket.on('connection', socket => {
+            socket.on('command', rawMessage => {
+                this.send(rawMessage.command, rawMessage.data);
+            });
+            socket.emit('status', true);
+        })
+    }
+
+    /* This function should be used to send any required commands to the drone.
+     * @param  {[string]} command [the drone command to forward]
+     * @param  {[json/string]} data [data associated with the drone command (if any)]
+     */
     send(command, data) {
         let rawInstructions = '';
         //convert instruciton to raw drone command
@@ -310,7 +352,7 @@ class Tello {
         if (command != HANDSHAKE_COMMAND && Date.now() - this.status.lastResponseTimestamp > COMMAND_RESET_PERIOD)
             this.send(HANDSHAKE_COMMAND);
         //push the command onto the drone command queue
-        var self = this;
+        let self = this;
         this.instructionQueue.push(async function (callback) {
             //send command and sleep the queue for the required delay period 
             self.forwardCommand(rawInstructions);
@@ -319,36 +361,35 @@ class Tello {
         })
         return this.status.connected;
     }
-    /*
-    Forwards the raw command to the drone. 
-    All validation of the instruction must be done on prior to calling this funciton
+
+    /* this method is called when a video frame is read and processed by the server 
+     * additional video processing logic can be implemented in this method
+     * the any changes to the frame must be done directly to the input parameter object 
+     * @param  {[cv frame object]} frame [frame containing image data to process]
     */
-    forwardCommand(command) {
-        this.droneIO.send(command, 0, command.length, this.commandPort, this.host, util.handleError);
-    }
-
-    //Returns the drone's current connection state (true / false)
-    getdroneState() {
-        return this.status.connected;
-    }
-
     processFrame(frame) {
-        var target;
-        if (this.status.automationInstruction == 'followPerson')
+        let target;
+        //follow primary detected face
+        if (this.status.automationInstruction == this.automationOptions[0])
             target = automation.trackFace(frame);
 
+        //follow bundle of all detected faces in the frame
+        if (this.status.automationInstruction == this.automationOptions[1])
+            target = automation.trackFaces(frame);
+
         if (target != undefined) {
+            //store the target's location with respect to the frame
             this.status.destinationTarget = target;
-            //set the target locked flag and kick off the movement loop 
+
+            //set the target locked flag and kick off the motion loop 
             if (!this.status.targetLock) {
                 this.status.targetLock = true;
-                clearInterval(this.status.moveInterval);
-                this.followLoop(30);
+                this.automationLoop(AUTOMATION_CYCLE);
             }
-
+            //display the observe window range within the frame
             frame.drawRectangle(
-                new cv2.Point2((frame.sizes[1] - this.observeWindow[1]) / 2, (frame.sizes[0] - this.observeWindow[0]) / 2),
-                new cv2.Point2((frame.sizes[1] + this.observeWindow[1]) / 2, (frame.sizes[0] + this.observeWindow[0]) / 2),
+                new cv2.Point2((frame.sizes[1] / 2) - this.observeWindow[1], (frame.sizes[0] / 2) - this.observeWindow[0]),
+                new cv2.Point2((frame.sizes[1] / 2) + this.observeWindow[1], (frame.sizes[0] / 2) + this.observeWindow[0]),
                 new cv2.Vec(255, 173, 5),
                 1,
                 cv2.LINE_8
@@ -361,39 +402,115 @@ class Tello {
             setTimeout(() => {
                 if (!this.status.targetLock) {
                     this.send('rc', { a: 0, b: 0, c: 0, d: 0 });
-                    clearInterval(this.status.moveInterval);
+                    clearInterval(this.status.trackTargetMoveInterval);
                 }
             }, 50);
         }
     }
 
-    followLoop(updatePeriod) {
-        this.status.moveInterval = setInterval(() => {
-            var xError = this.status.destinationTarget.x - (FRAME_SIZE[0] / 2);
-            var zError = -(this.status.destinationTarget.z - (FRAME_SIZE[1] / 2));
-            var r = 0;
-            var z = 0;
-            if (Math.abs(xError) > this.observeWindow[0] / 2)
+    /* This is the main automation loop for the drone continously sending mvoement instructions
+     * @param  {[cv frame object]} frame [frame containing image data to process]
+     */
+    automationLoop(updatePeriod) {
+        //clear the previous automation interval
+        clearInterval(this.status.trackTargetMoveInterval);
+        this.status.trackTargetMoveInterval = setInterval(() => {
+            //calculate the delta between the observeRange and target size within the frame
+            let widthError = ((this.observeRange[1] - this.observeRange[0]) / 2) - this.status.destinationTarget.percent_x;
+            let heightError = ((this.observeRange[1] - this.observeRange[0]) / 2) - this.status.destinationTarget.percent_z;
+
+            //calculate the x, y and z errors 
+            let xError = this.status.destinationTarget.x - (FRAME_SIZE[0] / 2);
+            let zError = -(this.status.destinationTarget.z - (FRAME_SIZE[1] / 2));
+            //take the larger of the two errors for the yError
+            let yError = Math.abs(widthError) > Math.abs(heightError) ? widthError : heightError;
+
+            let r = 0;
+            let z = 0;
+            let y = 0;
+
+            //if the error is outside the permitted threshold run the error through the PID controllers
+            if (Math.abs(xError) > this.observeWindow[0])
                 r = this.PIDX.getPIDOutput(xError);
-            if (Math.abs(zError) > this.observeWindow[1] / 2)
+            if (Math.abs(zError) > this.observeWindow[1])
                 z = this.PIDZ.getPIDOutput(zError);
-
-            this.status.rc = { a: 0, b: 0, c: z, d: r };
-
+            //only run the y dimansion PID controller if the z,y target is achieved 
+            if (r == 0 && z == 0) {
+                if (Math.abs(yError) > Math.abs((this.observeRange[1] - this.observeRange[0]) / 2))
+                    y = -this.PIDY.getPIDOutput(yError);
+            }
+            //set the status value for sending downstream to the User Interface
+            this.status.rc = { a: 0, b: y, c: z, d: r };
+            //if the target is still locked set the rc command for this itteration of the automation loop
             if (this.status.targetLock)
-                this.send('rc', { a: 0, b: 0, c: z, d: r });
+                this.send('rc', { a: 0, b: y, c: z, d: r });
 
         }, updatePeriod);
     }
 
+    /*
+     * Forwards the raw command to the drone. 
+     * All validation of the instruction must be done on prior to calling this funciton
+     * @param  {[string]} command [raw command to forward to the drone]
+     */
+    forwardCommand(command) {
+        this.droneIO.send(command, 0, command.length, this.commandPort, this.host, util.handleError);
+    }
+
+    //Returns the drone's current connection state (true / false)
+    getdroneState() {
+        return this.status.connected;
+    }
+
+    /*
+     * Update the automation isntructions for the drone . 
+     * @param  {[string]} flag [automation option value (see automationOptions)]
+     */
     setAutomationTarget(flag) {
         this.status.automationInstruction = flag;
         this.status.automated = true;
     }
 
+    /*
+     * Disable any active automation isntructions for the drone. 
+     */
     clearAutomationTarget() {
         this.status.automated = false;
         this.status.automationInstruction = null;
+    }
+
+    /*
+     * update the websocket object for downstream video streaming. 
+     * @param  {[socket.io Server object]} server [server used for transmition of video data]
+     */
+    setDownstreamVideoStream(server) {
+        this.videoServerEndpoint = server;
+    }
+
+    //compiles and returns data stored in the read cache
+    getInfo() {
+        let speed = 0;
+        let wifi = 0;
+        //check and pull the most relevent value for the drone's speed from the cache
+        if (this.droneCache.get(SPEED_GET_COMMAND).current.value == null)
+            speed = this.droneCache.get(SPEED_GET_COMMAND).last.value;
+        else if (this.droneCache.get(SPEED_GET_COMMAND).current.value != -1)
+            speed = this.droneCache.get(SPEED_GET_COMMAND).current.value;
+        else
+            speed = null;
+        //check and pull the most relevent value for the drone's wifi signal from the cache
+        if (this.droneCache.get(WIFI_GET_COMMAND).current.value == null)
+            wifi = this.droneCache.get(WIFI_GET_COMMAND).last.value;
+        else if (this.droneCache.get(WIFI_GET_COMMAND).current.value != -1)
+            wifi = this.droneCache.get(WIFI_GET_COMMAND).current.value;
+        else
+            wifi = null;
+        //fix bug with Tello sometimes retuning 100 speed when grounded.
+        speed = speed == 100.0 ? 0 : speed;
+        return ({
+            wifi: wifi == -1 ? null : wifi,
+            speed: speed == -1 ? null : speed,
+        })
     }
 
 }

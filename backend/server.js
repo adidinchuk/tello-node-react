@@ -24,7 +24,7 @@ drone = new Drone(
     config.backend.drone.STATUS_PORT,
     config.backend.drone.HOST,
     config.backend.drone.VIDEO_ENDPOINT,
-    config.backend.SERVER_HOST + ':' + config.backend.VIDEO_STREAMING_SERVER_PORT
+    videoEndpoint
 );
 
 drone.setIOStream(IOEndpoint, 'dronestate');
@@ -69,7 +69,7 @@ app.post("/api/automation/followperson", (req, res) => {
     res.send(drone.setAutomationTarget('followPerson'));
 });
 
-app.post("/api/follow/followpersons", (req, res) => {
+app.post("/api/automation/followpersons", (req, res) => {
     res.send(drone.setAutomationTarget('followPersons'));
 });
 
