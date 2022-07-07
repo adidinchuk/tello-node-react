@@ -17,8 +17,8 @@ const SPEED_GET_COMMAND = 'speed?';
 
 
 const GET_COMMAND_TIMEOUT_THRESHOLD = 2000; // maximum time the server will wait for a read response from the drone (ms)
-const RECONNECTION_ATTEMPT_PERIOD = 5000; // reconnection attempt frequency (ms)
-const COMMAND_RESET_PERIOD = 1000; // permitted drone silence preiod before the connection is considered lost (ms)
+const RECONNECTION_ATTEMPT_PERIOD = 10000; // reconnection attempt frequency (ms)
+const COMMAND_RESET_PERIOD = 2000; // permitted drone silence preiod before the connection is considered lost (ms)
 const AUTOMATION_CYCLE = 30; // frequency of the cycle that sends movement commands to the drone when in automation mode (ms)
 const DRONE_STATE_THROTTLE = 1000; // dictates how often drone state data should be sent downstream to consuming systems (ms)
 const FRAME_SIZE = [960, 720]; // drone camera frame size in pixles 
@@ -74,9 +74,9 @@ class Tello {
 
     // PID controller definitions
     // values have been tweeked for the Tello drone 
-    PIDX = new PIDController(0.02, 0, 0.02, 100, -100);
+    PIDX = new PIDController(0.1, 0, 0.2, 20, -20);
     PIDY = new PIDController(8, 0, 15, 40, -40);
-    PIDZ = new PIDController(0.01, 0, 0.01, 100, -100);
+    PIDZ = new PIDController(0.1, 0, 0.1, 100, -100);
 
     /*
     * constructor description
